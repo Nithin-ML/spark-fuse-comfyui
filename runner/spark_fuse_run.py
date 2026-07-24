@@ -330,10 +330,11 @@ def _collect_new_outputs(before, subdir_name):
     Diffing (not a fresh-subfolder-per-entry render target) because ComfyUI's
     --output-directory is fixed for the whole process; this is the only way to
     tell one workflow's files apart from another's without touching ComfyUI's
-    save nodes. Each entry's move completes (or the entry is abandoned on
-    failure, see run_manifest) before the next entry's "before" snapshot is
-    taken, so an already-moved prior entry's files never look "new" here — no
-    manifest entry can steal another's outputs.
+    save nodes. run_manifest() calls this unconditionally, whether the entry
+    succeeded or failed partway through, and always before the next entry's
+    "before" snapshot is taken — so an already-moved prior entry's files
+    (complete or partial) never look "new" here, and no manifest entry can
+    steal another's outputs.
 
     Fallback (single-workflow) mode never calls this; report_outputs() above is
     untouched and keeps the flat /output layout old bridges expect.
@@ -356,18 +357,31 @@ def _collect_new_outputs(before, subdir_name):
 def run_manifest(proc, entries):
     """Run every manifest entry against the one already-live ComfyUI process.
 
-    Continue-on-failure: a WorkflowFailure (codes 1/3/4/5) from one entry is
-    logged and that entry is marked failed; the loop moves on to the next
-    entry rather than aborting the job. Returns the job's overall exit code —
-    0 if every entry succeeded, 1 if any failed. die(6) from wait_done() (a
-    dead ComfyUI process) is not caught here; it exits the whole process
+    Continue-on-failure: a WorkflowFailure (raised for codes 1/3/4) from one
+    entry is logged and that entry is marked failed; the loop moves on to the
+    next entry rather than aborting the job. die(6) from wait_done() (a dead
+    ComfyUI process) is not caught here; it exits the whole process
     immediately, same as in fallback mode, since no further entry can run.
+
+    _collect_new_outputs() runs unconditionally, whether the entry succeeded
+    or failed partway through its batch loop, so a failed entry's partial
+    output (e.g. 2 of 3 batch renders done before it failed) still gets moved
+    into that entry's wf_NN/ folder instead of being left unattributed at the
+    flat /output root. It runs before the next entry's "before" snapshot is
+    taken either way, so cross-attribution between entries stays impossible.
+    An entry that produced nothing at all (success or failure) gets no wf_NN/
+    folder — _collect_new_outputs only creates it when there's something to
+    move.
+
+    Returns the job's overall exit code: 0 if every entry succeeded, 1 if any
+    failed (including "ran clean but produced no files").
     """
     total = len(entries)
     any_failed = False
     for idx, (workflow, batch_count) in enumerate(entries, start=1):
         log(f"workflow {idx}/{total} started")
         before = _output_snapshot()
+        failure = None
         try:
             if batch_count > 1:
                 log(f"workflow {idx}/{total}: batch render, {batch_count} "
@@ -379,15 +393,26 @@ def run_manifest(proc, entries):
                         f"(randomised {n_seeds} seed input(s))")
                 prompt_id = submit(workflow)
                 wait_done(proc, prompt_id)
-            moved = _collect_new_outputs(before, f"wf_{idx:02d}")
-            if not moved:
-                raise WorkflowFailure(
-                    5, "workflow completed but wrote nothing to /output — "
-                       "does the workflow contain a save node?")
-            log(f"workflow {idx}/{total} succeeded ({len(moved)} file(s))")
         except WorkflowFailure as exc:
+            failure = exc
+
+        # Always collect whatever this entry wrote, success or failure, before
+        # the next entry's "before" snapshot is taken.
+        moved = _collect_new_outputs(before, f"wf_{idx:02d}")
+
+        if failure is not None:
             any_failed = True
-            log(f"workflow {idx}/{total} failed: {exc.message}")
+            suffix = f" ({len(moved)} partial file(s))" if moved else ""
+            log(f"workflow {idx}/{total} failed: {failure.message}{suffix}")
+            continue
+
+        if not moved:
+            any_failed = True
+            log(f"workflow {idx}/{total} failed: workflow completed but wrote "
+                "nothing to /output — does the workflow contain a save node?")
+            continue
+
+        log(f"workflow {idx}/{total} succeeded ({len(moved)} file(s))")
     return 1 if any_failed else 0
 
 
