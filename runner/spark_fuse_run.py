@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""Spark Fuse job runner — drives one headless ComfyUI workflow per container.
+"""Spark Fuse job runner — drives one or more headless ComfyUI workflows per
+container, against a single ComfyUI process.
 
 Job contract:
-  /input/workflow.json   ComfyUI API-format workflow (read-only mount)
+  /input/spark_fuse_job.json   optional manifest: {"workflows": [{"workflow":
+                                {...API-format graph...}, "batch_count": N}, ...]}.
+                                When present, every entry runs in manifest order
+                                against ONE ComfyUI boot; outputs land under
+                                /output/wf_01/, /output/wf_02/, ... (zero-padded,
+                                manifest order).
+  /input/workflow.json         single-workflow fallback, used only when the
+                                manifest above is absent. Exact pre-manifest
+                                behaviour: one workflow, BATCH_COUNT repeats,
+                                flat /output. This is what an old bridge submits,
+                                so it must keep working unchanged.
   /input/models/...      model files (checkpoints/, loras/, vae/, ...)
   /output/               everything written here persists to ShareSync
 
 The ComfyUI server only ever listens on container-internal loopback; Spark
 Fuse publishes no ports and none are needed.
 
-Exit codes:
+Exit codes (single-workflow / fallback mode, unchanged):
   0  success — workflow completed, files written to /output
   1  workflow executed but ended in error
   2  bad input (workflow.json missing / unparsable / not API format, or
@@ -18,6 +29,19 @@ Exit codes:
   4  JOB_TIMEOUT_SECONDS exceeded
   5  workflow completed but produced no files in /output
   6  ComfyUI server failed to start or died mid-run
+
+Exit codes (manifest mode):
+  0  every workflow in the manifest succeeded
+  1  at least one workflow failed; the others still ran (see per-workflow
+     [runner] markers in the log for which)
+  2  bad input (manifest missing/malformed, or /output not writable)
+  6  ComfyUI server failed to start or died mid-run (fatal — aborts the whole
+     job; a dead ComfyUI process cannot run the remaining workflows)
+
+  Codes 3 (submission rejected), 4 (JOB_TIMEOUT_SECONDS exceeded) and 5 (no
+  files produced) are per-workflow conditions in manifest mode: that single
+  workflow is marked failed and the job moves on to the next entry, then
+  exits 1 overall rather than dying on the spot.
 """
 import json
 import os
@@ -34,6 +58,7 @@ COMFYUI_DIR = Path(os.environ.get("COMFYUI_DIR", "/default-comfyui-bundle/ComfyU
 INPUT_DIR = Path(os.environ.get("INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 WORKFLOW_PATH = Path(os.environ.get("WORKFLOW_PATH", str(INPUT_DIR / "workflow.json")))
+MANIFEST_PATH = Path(os.environ.get("MANIFEST_PATH", str(INPUT_DIR / "spark_fuse_job.json")))
 PORT = int(os.environ.get("COMFY_PORT", "8188"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
 STARTUP_TIMEOUT = int(os.environ.get("STARTUP_TIMEOUT_SECONDS", "300"))
@@ -59,6 +84,22 @@ MODEL_SUBDIRS = [
 ]
 # Generated at runtime from MODEL_BASE_DIR (see write_extra_model_paths()).
 EXTRA_MODEL_PATHS = Path("/tmp/spark_fuse_extra_model_paths.yaml")
+
+
+class WorkflowFailure(Exception):
+    """One manifest entry's failure (exit codes 1, 3, 4 or 5 — never 2 or 6).
+
+    Raised by submit()/wait_done()/_collect_new_outputs() instead of calling
+    die() directly, so manifest mode can catch it, mark that entry failed, and
+    continue to the next one. Fallback (single-workflow) mode catches it right
+    back into die(code, message), reproducing today's immediate-exit behaviour
+    exactly.
+    """
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def log(msg):
@@ -98,6 +139,25 @@ def log_banner():
         log("nvidia-smi not available")
 
 
+def _validate_workflow_shape(workflow, label):
+    """Shared API-format check for both workflow.json and each manifest entry.
+
+    Always fatal (exit 2) on a bad shape, even from inside a manifest — a
+    malformed graph means the job can never legitimately run, same severity
+    as a bad workflow.json today.
+    """
+    if not isinstance(workflow, dict):
+        die(2, f"{label} is not a JSON object")
+    if "nodes" in workflow and "links" in workflow:
+        die(2, f"{label} is a UI-format export; re-export with "
+               "'Save (API Format)' (enable dev mode options in ComfyUI settings)")
+    bad = [k for k, v in workflow.items()
+           if not (isinstance(v, dict) and "class_type" in v)]
+    if bad:
+        die(2, f"{label} does not look like API format "
+               f"(offending keys: {bad[:5]})")
+
+
 def load_workflow():
     if not WORKFLOW_PATH.is_file():
         die(2, f"workflow not found at {WORKFLOW_PATH}")
@@ -105,18 +165,37 @@ def load_workflow():
         workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as err:
         die(2, f"cannot parse {WORKFLOW_PATH}: {err}")
-    if not isinstance(workflow, dict):
-        die(2, "workflow.json is not a JSON object")
-    if "nodes" in workflow and "links" in workflow:
-        die(2, "workflow.json is a UI-format export; re-export with "
-               "'Save (API Format)' (enable dev mode options in ComfyUI settings)")
-    bad = [k for k, v in workflow.items()
-           if not (isinstance(v, dict) and "class_type" in v)]
-    if bad:
-        die(2, f"workflow.json does not look like API format "
-               f"(offending keys: {bad[:5]})")
+    _validate_workflow_shape(workflow, "workflow.json")
     log(f"workflow loaded: {len(workflow)} nodes")
     return workflow
+
+
+def load_manifest():
+    """Load and validate /input/spark_fuse_job.json; return [(workflow, batch_count), ...]
+    in manifest order. Any structural problem is fatal (exit 2), checked entirely
+    before ComfyUI starts — same severity and timing as a bad workflow.json today.
+    """
+    try:
+        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        die(2, f"cannot parse {MANIFEST_PATH}: {err}")
+    entries = raw.get("workflows") if isinstance(raw, dict) else None
+    if not isinstance(entries, list) or not entries:
+        die(2, f"{MANIFEST_PATH} must be a JSON object with a non-empty 'workflows' array")
+    parsed = []
+    for i, entry in enumerate(entries):
+        label = f"{MANIFEST_PATH.name} workflows[{i}]"
+        if not isinstance(entry, dict) or not isinstance(entry.get("workflow"), dict):
+            die(2, f"{label} missing a 'workflow' object")
+        workflow = entry["workflow"]
+        _validate_workflow_shape(workflow, f"{label}.workflow")
+        try:
+            batch_count = max(1, min(int(entry.get("batch_count") or 1), 100))
+        except (TypeError, ValueError):
+            batch_count = 1
+        parsed.append((workflow, batch_count))
+    log(f"manifest loaded: {len(parsed)} workflow(s)")
+    return parsed
 
 
 def check_output_writable():
@@ -180,21 +259,30 @@ def submit(workflow):
         body = err.read().decode("utf-8", errors="replace")
         log(f"ComfyUI rejected the workflow (HTTP {err.code}):")
         print(body, flush=True)
-        die(3, "workflow validation failed")
+        raise WorkflowFailure(3, "workflow validation failed")
     prompt_id = resp.get("prompt_id")
     if not prompt_id:
-        die(3, f"no prompt_id in /prompt response: {resp}")
+        raise WorkflowFailure(3, f"no prompt_id in /prompt response: {resp}")
     log(f"workflow queued, prompt_id={prompt_id}")
     return prompt_id
 
 
 def wait_done(proc, prompt_id):
+    """Poll a submitted prompt to completion. start resets on every call, so
+    JOB_TIMEOUT_SECONDS is (and always was) a per-render ceiling, not a whole-job
+    one — calling this once per manifest entry preserves that scoping unchanged.
+
+    Raises WorkflowFailure(1) on execution error or WorkflowFailure(4) on
+    JOB_TIMEOUT_SECONDS — both recoverable, per-workflow conditions in manifest
+    mode. A dead ComfyUI process (die(6)) is not recoverable in either mode: no
+    remaining workflow can run without the server, so it still exits immediately.
+    """
     start = time.monotonic()
     last_beat = start
     while True:
         elapsed = time.monotonic() - start
         if JOB_TIMEOUT and elapsed > JOB_TIMEOUT:
-            die(4, f"job exceeded JOB_TIMEOUT_SECONDS={JOB_TIMEOUT}")
+            raise WorkflowFailure(4, f"job exceeded JOB_TIMEOUT_SECONDS={JOB_TIMEOUT}")
         if proc.poll() is not None:
             die(6, f"ComfyUI died mid-run (code {proc.returncode})")
         try:
@@ -211,7 +299,7 @@ def wait_done(proc, prompt_id):
                     if event in ("execution_error", "execution_interrupted"):
                         log(f"{event}:")
                         print(json.dumps(data, indent=2), flush=True)
-                die(1, "workflow execution failed")
+                raise WorkflowFailure(1, "workflow execution failed")
             if status.get("completed"):
                 log(f"workflow completed in {elapsed:.0f}s")
                 return entry
@@ -229,6 +317,78 @@ def report_outputs():
         die(5, "workflow completed but wrote nothing to /output — "
                "does the workflow contain a save node?")
     return files
+
+
+def _output_snapshot():
+    """Manifest mode only: every file currently under /output, for before/after diffing."""
+    return {p for p in OUTPUT_DIR.rglob("*") if p.is_file()}
+
+
+def _collect_new_outputs(before, subdir_name):
+    """Move files that appeared under /output since *before* into /output/<subdir_name>/.
+
+    Diffing (not a fresh-subfolder-per-entry render target) because ComfyUI's
+    --output-directory is fixed for the whole process; this is the only way to
+    tell one workflow's files apart from another's without touching ComfyUI's
+    save nodes. Each entry's move completes (or the entry is abandoned on
+    failure, see run_manifest) before the next entry's "before" snapshot is
+    taken, so an already-moved prior entry's files never look "new" here — no
+    manifest entry can steal another's outputs.
+
+    Fallback (single-workflow) mode never calls this; report_outputs() above is
+    untouched and keeps the flat /output layout old bridges expect.
+    """
+    after = _output_snapshot()
+    new_files = sorted(after - before)
+    if not new_files:
+        return []
+    subdir = OUTPUT_DIR / subdir_name
+    subdir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for f in new_files:
+        dest = subdir / f.name
+        f.rename(dest)
+        moved.append(dest)
+        log(f"output: {dest.relative_to(OUTPUT_DIR)} ({dest.stat().st_size:,} bytes)")
+    return moved
+
+
+def run_manifest(proc, entries):
+    """Run every manifest entry against the one already-live ComfyUI process.
+
+    Continue-on-failure: a WorkflowFailure (codes 1/3/4/5) from one entry is
+    logged and that entry is marked failed; the loop moves on to the next
+    entry rather than aborting the job. Returns the job's overall exit code —
+    0 if every entry succeeded, 1 if any failed. die(6) from wait_done() (a
+    dead ComfyUI process) is not caught here; it exits the whole process
+    immediately, same as in fallback mode, since no further entry can run.
+    """
+    total = len(entries)
+    any_failed = False
+    for idx, (workflow, batch_count) in enumerate(entries, start=1):
+        log(f"workflow {idx}/{total} started")
+        before = _output_snapshot()
+        try:
+            if batch_count > 1:
+                log(f"workflow {idx}/{total}: batch render, {batch_count} "
+                    f"image(s) in this workflow (model already warm)")
+            for b in range(batch_count):
+                if b > 0:
+                    n_seeds = randomize_seeds(workflow)
+                    log(f"workflow {idx}/{total}: render {b + 1}/{batch_count} "
+                        f"(randomised {n_seeds} seed input(s))")
+                prompt_id = submit(workflow)
+                wait_done(proc, prompt_id)
+            moved = _collect_new_outputs(before, f"wf_{idx:02d}")
+            if not moved:
+                raise WorkflowFailure(
+                    5, "workflow completed but wrote nothing to /output — "
+                       "does the workflow contain a save node?")
+            log(f"workflow {idx}/{total} succeeded ({len(moved)} file(s))")
+        except WorkflowFailure as exc:
+            any_failed = True
+            log(f"workflow {idx}/{total} failed: {exc.message}")
+    return 1 if any_failed else 0
 
 
 def shutdown(proc):
@@ -261,26 +421,45 @@ def randomize_seeds(workflow):
 
 def main():
     log_banner()
-    workflow = load_workflow()
+
+    # Manifest presence decides the mode entirely: an old bridge never writes
+    # /input/spark_fuse_job.json, so it always takes the fallback branch below,
+    # unchanged from before this file gained manifest support.
+    manifest = load_manifest() if MANIFEST_PATH.is_file() else None
+    workflow = None if manifest is not None else load_workflow()
+
     check_output_writable()
     write_extra_model_paths()
     proc = start_comfyui()
     try:
         wait_ready(proc)
-        if BATCH_COUNT > 1:
-            log(f"batch render: {BATCH_COUNT} images in one job (model loads once)")
-        for i in range(BATCH_COUNT):
-            if i > 0:
-                n = randomize_seeds(workflow)
-                log(f"render {i + 1}/{BATCH_COUNT} (randomised {n} seed input(s))")
-            elif BATCH_COUNT > 1:
-                log(f"render 1/{BATCH_COUNT}")
-            prompt_id = submit(workflow)
-            wait_done(proc, prompt_id)
-        files = report_outputs()
-        log(f"job complete: {len(files)} file(s) in {OUTPUT_DIR}")
+        if manifest is not None:
+            exit_code = run_manifest(proc, manifest)
+        else:
+            if BATCH_COUNT > 1:
+                log(f"batch render: {BATCH_COUNT} images in one job (model loads once)")
+            try:
+                for i in range(BATCH_COUNT):
+                    if i > 0:
+                        n = randomize_seeds(workflow)
+                        log(f"render {i + 1}/{BATCH_COUNT} (randomised {n} seed input(s))")
+                    elif BATCH_COUNT > 1:
+                        log(f"render 1/{BATCH_COUNT}")
+                    prompt_id = submit(workflow)
+                    wait_done(proc, prompt_id)
+            except WorkflowFailure as exc:
+                die(exc.code, exc.message)
+            files = report_outputs()
+            log(f"job complete: {len(files)} file(s) in {OUTPUT_DIR}")
     finally:
         shutdown(proc)
+
+    if manifest is not None:
+        if exit_code == 0:
+            log(f"job complete: all {len(manifest)} workflow(s) succeeded")
+        else:
+            log("job complete: one or more workflows failed")
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
