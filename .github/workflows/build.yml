@@ -38,8 +38,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/vfxguru/spark-fuse-comfyui
+          # latest is written only by a real push to main. A manual run
+          # (workflow_dispatch) never writes it, even with main selected.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=sha,format=long
 
       - name: Build and push (linux/amd64)

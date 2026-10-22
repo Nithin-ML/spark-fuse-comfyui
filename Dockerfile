@@ -1,6 +1,12 @@
 # ComfyUI on Spark Fuse — Flux test image.
 # Models are NOT baked in; they arrive per job under /input/models/ (ShareSync).
-FROM yanwk/comfyui-boot:cu130-slim-v2
+#
+# Base pinned by digest: the moving cu130-slim-v2 tag silently changed ComfyUI
+# between rebuilds. This pin provides ComfyUI 0.30.1, the first dated tag with
+# the built-in MiniMaxH3ImageToVideo node (added in ComfyUI 0.30.0).
+# Rollback target (ComfyUI 0.28.0, production before this pin):
+# FROM yanwk/comfyui-boot:cu130-slim-v2-20260717@sha256:e2fada7c3db5ed043d99b336ab2e1b68d100cac74e094ad39a28831e1bb7fffb
+FROM yanwk/comfyui-boot:cu130-slim-v2-20260803@sha256:9cde099f3fa5b39a58ceadf4562d4e157b4f5e3008d1690d6c5bba9ffd0cffbb
 
 # The base's entrypoint copies the bundle to /root on first start; we skip all
 # of that — nodes are installed into the bundle itself and the runner launches

@@ -1,0 +1,46 @@
+# The build only needs nodes.json, scripts/install_nodes.py and runner/
+# (see the COPY lines in the Dockerfile). Everything below stays out of the
+# build context.
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+*.pdf
+LICENSE
+
+# Python caches and environments
+**/__pycache__
+**/*.py[cod]
+.venv
+venv
+
+# Local secrets, settings and editor files
+.env
+.env.*
+.claude
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Job data and model weights
+input
+output
+**/*.safetensors
+**/*.gguf
+**/*.ckpt
+**/*.pt
+**/*.pth
+
+# Tool caches, logs and build artefacts
+.pytest_cache
+.ruff_cache
+**/*.log
+dist
+build
+**/*.zip
