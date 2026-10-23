@@ -38,11 +38,14 @@ RUN python3.13 /build/install_nodes.py /build/nodes.json "$COMFYUI_DIR/custom_no
 # - The base installs onnxruntime (CPU) and a CUDA 13 nightly over the same
 #   module path. 1.30.0 is the PyPI CUDA 13 build whose GPU discovery skips
 #   DRM cards that have no PCI vendor file, instead of warning about them.
-RUN python3.13 -m pip show pynvml onnxruntime onnxruntime-gpu || true \
-    && python3.13 - <<'PY'
+# One heredoc: a second `&&` after a closing delimiter is a new Dockerfile
+# instruction, not a continuation of this RUN.
+RUN python3.13 - <<'PY'
 import importlib.metadata
+import os
 import subprocess
 import sys
+import warnings
 
 def installed(dist):
     try:
@@ -50,6 +53,8 @@ def installed(dist):
         return True
     except importlib.metadata.PackageNotFoundError:
         return False
+
+subprocess.call([sys.executable, "-m", "pip", "show", "pynvml", "onnxruntime", "onnxruntime-gpu"])
 
 if installed("pynvml"):
     subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "pynvml"])
@@ -69,9 +74,7 @@ subprocess.check_call([
     sys.executable, "-m", "pip", "install", "--no-cache-dir", "--no-deps",
     "onnxruntime-gpu==1.30.0",
 ])
-PY
-    && python3.13 - <<'PY'
-import warnings
+
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
     import pynvml
@@ -84,8 +87,11 @@ providers = ort.get_available_providers()
 print("onnxruntime", ort.__version__, providers, flush=True)
 if "CUDAExecutionProvider" not in providers:
     raise SystemExit("CUDAExecutionProvider missing from onnxruntime")
+
+os.environ["MPLBACKEND"] = "Agg"
+import matplotlib.font_manager as fm
+fm.fontManager
 PY
-    && MPLBACKEND=Agg python3.13 -c "import matplotlib.font_manager as fm; fm.fontManager"
 
 COPY runner/ /runner/
 
