@@ -61,6 +61,19 @@ install — see [nodes.json](nodes.json). Registry nodes are installed from the
 git-only nodes are fetched at exact commits. ComfyUI-Manager is deliberately
 removed (it must not self-update inside a batch container).
 
+## Base image pin
+
+The `FROM` line in the [Dockerfile](Dockerfile) pins `yanwk/comfyui-boot` by
+digest, not by tag. The upstream `cu130-slim-v2` tag is rebuilt for each
+ComfyUI release, so before the pin a rebuild could silently change ComfyUI
+(0.25.1 to 0.28.0, with no change to the Dockerfile). To get the digest for a
+dated upstream tag without pulling it, run
+`docker buildx imagetools inspect yanwk/comfyui-boot:cu130-slim-v2-<YYYYMMDD>`
+and copy the `Digest:` line. Changing the pin is the deliberate way to upgrade
+ComfyUI: check the custom nodes in `nodes.json` against the new version, and
+test on a branch before merging. The comment above the `FROM` line records the
+previous pin for a one-line rollback.
+
 ## Build & publish
 
 GitHub Actions ([build.yml](.github/workflows/build.yml)) builds `linux/amd64`

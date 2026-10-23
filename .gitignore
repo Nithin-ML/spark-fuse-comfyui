@@ -7,3 +7,34 @@ venv/
 .env
 input/
 output/
+
+# Model weights: never commit, they arrive per job via ShareSync
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
+
+# Local environment variants (the template stays tracked)
+.env.*
+!.env.example
+
+# Claude Code and editor settings
+.claude/
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Tool caches and logs
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# Build artefacts and archives
+dist/
+build/
+*.zip
