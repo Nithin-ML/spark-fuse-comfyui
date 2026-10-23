@@ -23,8 +23,8 @@ Fuse publishes no ports and none are needed.
 Exit codes (single-workflow / fallback mode, unchanged):
   0  success — workflow completed, files written to /output
   1  workflow executed but ended in error
-  2  bad input (workflow.json missing / unparsable / not API format, or
-     /output not writable)
+  2  bad input (workflow.json missing / unparsable / not API format,
+     /output not writable, or the input directory cannot be staged)
   3  ComfyUI rejected the workflow at submission
   4  JOB_TIMEOUT_SECONDS exceeded
   5  workflow completed but produced no files in /output
@@ -34,7 +34,8 @@ Exit codes (manifest mode):
   0  every workflow in the manifest succeeded
   1  at least one workflow failed; the others still ran (see per-workflow
      [runner] markers in the log for which)
-  2  bad input (manifest missing/malformed, or /output not writable)
+  2  bad input (manifest missing/malformed, /output not writable, or the
+     input directory cannot be staged)
   6  ComfyUI server failed to start or died mid-run (fatal — aborts the whole
      job; a dead ComfyUI process cannot run the remaining workflows)
 
@@ -47,6 +48,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -84,6 +86,11 @@ MODEL_SUBDIRS = [
 ]
 # Generated at runtime from MODEL_BASE_DIR (see write_extra_model_paths()).
 EXTRA_MODEL_PATHS = Path("/tmp/spark_fuse_extra_model_paths.yaml")
+# ComfyUI's input directory. /input is read-only for the life of the job, and
+# ComfyUI creates folders there at startup (Load3D's 3d/, uploads, and so on),
+# so the runner copies the job files here and passes this path instead.
+# Kept out of /tmp/comfyui because ComfyUI clears its temp directory on boot.
+STAGED_INPUT_DIR = Path("/tmp/spark-fuse-input")
 
 
 class WorkflowFailure(Exception):
@@ -221,6 +228,51 @@ def write_extra_model_paths():
     log(f"model search base: {MODEL_BASE_DIR}")
 
 
+def stage_input_directory():
+    """Copy the read-only input mount to a writable directory for ComfyUI.
+
+    A real copy, not symlinks: ComfyUI resolves input paths with realpath and
+    rejects anything that lands outside its input directory. The model tree is
+    left on the mount when MODEL_BASE_DIR sits under the input directory;
+    extra_model_paths.yaml reads it from there, so checkpoints are not copied.
+    """
+    input_root = INPUT_DIR.resolve()
+    skip_rel = None
+    try:
+        model_base = Path(MODEL_BASE_DIR).resolve()
+    except OSError:
+        model_base = None
+    if model_base is not None and model_base != input_root and input_root in model_base.parents:
+        skip_rel = model_base.relative_to(input_root)
+
+    def ignore_models(directory, names):
+        if skip_rel is None:
+            return []
+        try:
+            rel = Path(directory).resolve().relative_to(input_root)
+        except (OSError, ValueError):
+            return []
+        if rel == skip_rel.parent and skip_rel.name in names:
+            return [skip_rel.name]
+        return []
+
+    if STAGED_INPUT_DIR.exists():
+        shutil.rmtree(STAGED_INPUT_DIR)
+    try:
+        shutil.copytree(input_root, STAGED_INPUT_DIR, ignore=ignore_models)
+        # The mount is read-only, and copytree keeps those modes. ComfyUI has
+        # to be able to create folders and files in the copy.
+        for dirpath, dirnames, filenames in os.walk(STAGED_INPUT_DIR):
+            os.chmod(dirpath, 0o755)
+            for name in filenames:
+                os.chmod(Path(dirpath) / name, 0o644)
+    except OSError as err:
+        die(2, f"cannot stage {INPUT_DIR} to {STAGED_INPUT_DIR}: {err}")
+    files = [p for p in STAGED_INPUT_DIR.rglob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files)
+    log(f"staged input: {len(files)} file(s), {total:,} bytes -> {STAGED_INPUT_DIR}")
+
+
 def start_comfyui():
     cmd = [
         sys.executable, "main.py",
@@ -228,7 +280,7 @@ def start_comfyui():
         "--port", str(PORT),
         "--extra-model-paths-config", str(EXTRA_MODEL_PATHS),
         "--output-directory", str(OUTPUT_DIR),
-        "--input-directory", str(INPUT_DIR),
+        "--input-directory", str(STAGED_INPUT_DIR),
         "--temp-directory", "/tmp/comfyui",
     ]
     log(f"starting ComfyUI: {' '.join(cmd)}")
@@ -455,6 +507,7 @@ def main():
 
     check_output_writable()
     write_extra_model_paths()
+    stage_input_directory()
     proc = start_comfyui()
     try:
         wait_ready(proc)
