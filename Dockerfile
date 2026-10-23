@@ -29,8 +29,10 @@ RUN python3.13 /build/install_nodes.py /build/nodes.json "$COMFYUI_DIR/custom_no
     && rm -rf /build
 
 # Benign noise from the base image, cleaned up without moving the ComfyUI pin.
-# - The deprecated pynvml distribution warns on import. Uninstalling it leaves
-#   the pynvml module provided by nvidia-ml-py, at the version the base ships.
+# - pynvml 13 registers a meta-path finder from a .pth file at interpreter
+#   startup and warns on every import pynvml. Uninstalling that distribution
+#   drops the finder for the next process and leaves the pynvml module from
+#   nvidia-ml-py, at the version the base already ships.
 # - PyOpenGL logs a missing accelerator. Install it at PyOpenGL's own version
 #   so a later base bump cannot pair mismatched builds.
 # - matplotlib reports the color-emoji font only while building its font cache,
@@ -45,7 +47,6 @@ import importlib.metadata
 import os
 import subprocess
 import sys
-import warnings
 
 def installed(dist):
     try:
@@ -75,6 +76,22 @@ subprocess.check_call([
     "onnxruntime-gpu==1.30.0",
 ])
 
+# This process already loaded the pynvml .pth finder. A new interpreter is
+# what a job actually starts, and it is the only place the warning can be gone.
+subprocess.check_call([sys.executable, "-c", r"""
+import sys
+import warnings
+from pathlib import Path
+
+leftover = [
+    path
+    for root in map(Path, sys.path)
+    for name in ("_pynvml_redirector.pth", "_pynvml_redirector.py")
+    if (path := root / name).is_file()
+]
+if leftover:
+    raise SystemExit("pynvml redirector still installed: " + ", ".join(map(str, leftover)))
+
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
     import pynvml
@@ -87,6 +104,7 @@ providers = ort.get_available_providers()
 print("onnxruntime", ort.__version__, providers, flush=True)
 if "CUDAExecutionProvider" not in providers:
     raise SystemExit("CUDAExecutionProvider missing from onnxruntime")
+"""])
 
 os.environ["MPLBACKEND"] = "Agg"
 import matplotlib.font_manager as fm
