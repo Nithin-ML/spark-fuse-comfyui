@@ -38,3 +38,5 @@ desktop.ini
 dist/
 build/
 *.zip
+
+*.code-workspace
