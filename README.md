@@ -55,11 +55,12 @@ there, with no rebuild and no workflow changes.
 
 ## Custom nodes
 
-The image carries a pinned Flux node set matching the maintainer's desktop
-install — see [nodes.json](nodes.json). Registry nodes are installed from the
-[Comfy Registry](https://registry.comfy.org) at exact versions; the two
-git-only nodes are fetched at exact commits. ComfyUI-Manager is deliberately
-removed (it must not self-update inside a batch container).
+The image carries a pinned custom-node set — see [nodes.json](nodes.json).
+Registry nodes are installed from the [Comfy Registry](https://registry.comfy.org)
+at exact versions; git-only nodes are fetched at exact commits. ComfyUI-Manager
+is deliberately removed (it must not self-update inside a batch container).
+RES4LYF is omitted because importing it rewrites ComfyUI's sampler and
+scheduler tables, which would change workflows that never use a RES4LYF node.
 
 ## Base image pin
 

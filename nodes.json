@@ -8,7 +8,9 @@
     { "id": "comfyui-custom-scripts", "version": "1.2.5" },
     { "id": "rgthree-comfy", "version": "1.0.2604070017" },
     { "id": "cg-use-everywhere", "version": "7.8.0" },
-    { "id": "comfyui-image-saver", "version": "1.21.0" }
+    { "id": "comfyui-image-saver", "version": "1.21.0" },
+    { "id": "comfyui-videohelpersuite", "version": "1.7.9" },
+    { "id": "av-handles", "version": "1.4.0" }
   ],
   "git": [
     {
@@ -20,6 +22,16 @@
       "repo": "https://github.com/adieyal/comfyui-dynamicprompts",
       "folder": "comfyui-dynamicprompts",
       "commit": "3f2fff32358cf39e21b8b440ca87eac9a8e2bade"
+    },
+    {
+      "repo": "https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes",
+      "folder": "ComfyUI_Comfyroll_CustomNodes",
+      "commit": "d78b780ae43fcf8c6b7c6505e6ffb4584281ceca"
+    },
+    {
+      "repo": "https://github.com/theUpsider/ComfyUI-Logic",
+      "folder": "ComfyUI-Logic",
+      "commit": "214cfba933291be224156d37bc30c25742076b44"
     }
   ]
 }
