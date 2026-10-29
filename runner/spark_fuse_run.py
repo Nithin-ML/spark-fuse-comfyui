@@ -222,10 +222,60 @@ def write_extra_model_paths():
     a submit-time choice: /input/models by default, or /assets/models once the
     Spark Fuse assets mount is available, with no rebuild and no workflow edits.
     """
+    names = list(MODEL_SUBDIRS)
+    extra = _extra_model_dirs()
+    names += extra
     lines = ["spark_fuse:", f"  base_path: {MODEL_BASE_DIR}"]
-    lines += [f"  {name}: {name}" for name in MODEL_SUBDIRS]
+    lines += [f"  {name}: {name}" for name in names]
     EXTRA_MODEL_PATHS.write_text("\n".join(lines) + "\n")
     log(f"model search base: {MODEL_BASE_DIR}")
+    if extra:
+        log(f"extra model folders: {', '.join(extra)}")
+    _link_extra_model_dirs(extra)
+
+
+def _extra_model_dirs():
+    """Top-level folders under MODEL_BASE_DIR beyond the standard MODEL_SUBDIRS.
+
+    Custom nodes keep models in folders of their own (LLM/ for QwenVL,
+    depthcrafter/, sams/, BiRefNet/, ...). Listing only the top level keeps this
+    cheap on the lazily-mounted assets path.
+    """
+    base = Path(MODEL_BASE_DIR)
+    try:
+        entries = sorted(p.name for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    return [name for name in entries
+            if name not in MODEL_SUBDIRS and not name.startswith(".")]
+
+
+def _link_extra_model_dirs(names):
+    """Symlink extra model folders into ComfyUI's own models/ directory.
+
+    Many custom nodes ignore extra_model_paths.yaml and read
+    folder_paths.models_dir/<folder> directly; without the link they download
+    the model again on every job. An existing folder is replaced only when it
+    holds nothing but ComfyUI's put_*_here placeholder files.
+    """
+    models_dir = COMFYUI_DIR / "models"
+    for name in names:
+        source = Path(MODEL_BASE_DIR) / name
+        target = models_dir / name
+        try:
+            if target.is_symlink():
+                continue
+            if target.is_dir():
+                if any(not p.name.startswith("put_") for p in target.iterdir()):
+                    continue
+                shutil.rmtree(target)
+            elif target.exists():
+                continue
+            models_dir.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(source, target_is_directory=True)
+            log(f"linked models/{name} -> {source}")
+        except OSError as err:
+            log(f"could not link models/{name}: {err}")
 
 
 def stage_input_directory():
