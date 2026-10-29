@@ -3,7 +3,6 @@
     { "id": "ComfyUI-GGUF", "version": "1.1.10" },
     { "id": "comfyui-kjnodes", "version": "1.3.7" },
     { "id": "comfyui_controlnet_aux", "version": "1.1.5" },
-    { "id": "comfyui_essentials", "version": "1.1.0" },
     { "id": "comfyui-easy-use", "version": "1.3.6" },
     { "id": "comfyui-custom-scripts", "version": "1.2.5" },
     { "id": "rgthree-comfy", "version": "1.0.2604070017" },
@@ -32,6 +31,56 @@
       "repo": "https://github.com/theUpsider/ComfyUI-Logic",
       "folder": "ComfyUI-Logic",
       "commit": "214cfba933291be224156d37bc30c25742076b44"
+    },
+    {
+      "repo": "https://github.com/MinorBoy/ComfyUI_essentials_mb",
+      "folder": "ComfyUI_essentials_mb",
+      "commit": "09e7dce4aa3d734151b772da4a4b3abe1c62e7e2"
+    },
+    {
+      "repo": "https://github.com/kijai/ComfyUI-WanVideoWrapper",
+      "folder": "ComfyUI-WanVideoWrapper",
+      "commit": "088128b224242e110d3906c6750e9a3a348a659b"
+    },
+    {
+      "repo": "https://github.com/Lightricks/ComfyUI-LTXVideo",
+      "folder": "ComfyUI-LTXVideo",
+      "commit": "220e1d45aa0469f518e982102fca4dca92a61862"
+    },
+    {
+      "repo": "https://github.com/chflame163/ComfyUI_LayerStyle",
+      "folder": "ComfyUI_LayerStyle",
+      "commit": "51977b27869af9369e3d11a75d6fe8eb706f9821"
+    },
+    {
+      "repo": "https://github.com/1038lab/ComfyUI-QwenVL",
+      "folder": "ComfyUI-QwenVL",
+      "commit": "1b67b443918801f571714bab636edc1845b7002a"
+    },
+    {
+      "repo": "https://github.com/melMass/comfy_mtb",
+      "folder": "comfy_mtb",
+      "commit": "b35b5d8a17c0d59e80a8b3627b679c2c1003d04f"
+    },
+    {
+      "repo": "https://github.com/akatz-ai/ComfyUI-DepthCrafter-Nodes",
+      "folder": "ComfyUI-DepthCrafter-Nodes",
+      "commit": "f469414d48cd0393ed43ae47af692009ca071706"
+    },
+    {
+      "repo": "https://github.com/ltdrdata/was-node-suite-comfyui",
+      "folder": "was-node-suite-comfyui",
+      "commit": "44de705818d4663fefefde57ffe0ea5a9ea39df4"
+    },
+    {
+      "repo": "https://github.com/regiellis/ComfyUI-EasyColorCorrector",
+      "folder": "ComfyUI-EasyColorCorrector",
+      "commit": "fe86b8af5f857f536d6af2d8a62b8c07b1e4b39e"
+    },
+    {
+      "repo": "https://github.com/ClownsharkBatwing/RES4LYF",
+      "folder": "RES4LYF",
+      "commit": "56e44755d866c87ff9cb4b6608c8e42155db6ecc"
     }
   ]
 }

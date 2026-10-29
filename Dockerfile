@@ -28,6 +28,40 @@ COPY scripts/install_nodes.py /build/install_nodes.py
 RUN python3.13 /build/install_nodes.py /build/nodes.json "$COMFYUI_DIR/custom_nodes" \
     && rm -rf /build
 
+# Custom nodes pull different OpenCV wheels (opencv-python, -headless and
+# -contrib). All four distributions write the same cv2 package, so the last
+# install overwrites the others' files and leaves a mixed cv2. Keep exactly one:
+# contrib (LayerStyle needs cv2.ximgproc), headless (no GUI in a batch
+# container), at the newest version any node pulled in. --no-deps keeps numpy.
+RUN python3.13 - <<'PY'
+import importlib.metadata as md
+import subprocess
+import sys
+
+DISTS = ("opencv-python", "opencv-python-headless",
+         "opencv-contrib-python", "opencv-contrib-python-headless")
+
+def version_key(v):
+    return tuple(int(p) if p.isdigit() else 0 for p in v.split("."))
+
+found = {}
+for dist in DISTS:
+    try:
+        found[dist] = md.version(dist)
+    except md.PackageNotFoundError:
+        pass
+print("opencv distributions before:", found, flush=True)
+if found:
+    target = max(found.values(), key=version_key)
+    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", *found])
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--no-cache-dir", "--no-deps",
+        f"opencv-contrib-python-headless=={target}",
+    ])
+subprocess.check_call([sys.executable, "-c",
+    "import cv2; cv2.ximgproc.guidedFilter; print('cv2', cv2.__version__, 'with contrib', flush=True)"])
+PY
+
 # Benign noise from the base image, cleaned up without moving the ComfyUI pin.
 # - pynvml 13 registers a meta-path finder from a .pth file at interpreter
 #   startup and warns on every import pynvml. Uninstalling that distribution
