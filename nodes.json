@@ -33,9 +33,9 @@
       "commit": "214cfba933291be224156d37bc30c25742076b44"
     },
     {
-      "repo": "https://github.com/theUpsider/ComfyUI-Logic",
-      "folder": "ComfyUI-Logic-legacy",
-      "commit": "f95b332091ec1d6a8b1df4bedf1b054e9807f5e2"
+      "repo": "https://github.com/M1kep/ComfyLiterals",
+      "folder": "ComfyLiterals",
+      "commit": "bdddb08ca82d90d75d97b1d437a652e0284a32ac"
     },
     {
       "repo": "https://github.com/MinorBoy/ComfyUI_essentials_mb",
@@ -56,6 +56,11 @@
       "repo": "https://github.com/kijai/ComfyUI-segment-anything-2",
       "folder": "ComfyUI-segment-anything-2",
       "commit": "0c35fff5f382803e2310103357b5e985f5437f32"
+    },
+    {
+      "repo": "https://github.com/9nate-drake/Comfyui-SecNodes",
+      "folder": "Comfyui-SecNodes",
+      "commit": "af39e6260bc414873fbb2dc8df355904d1609754"
     },
     {
       "repo": "https://github.com/Lightricks/ComfyUI-LTXVideo",
