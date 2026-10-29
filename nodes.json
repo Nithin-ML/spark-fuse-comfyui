@@ -48,6 +48,16 @@
       "commit": "088128b224242e110d3906c6750e9a3a348a659b"
     },
     {
+      "repo": "https://github.com/kijai/ComfyUI-WanAnimatePreprocess",
+      "folder": "ComfyUI-WanAnimatePreprocess",
+      "commit": "0e0b6a2a555625acf4d4aefb780e27d06937132f"
+    },
+    {
+      "repo": "https://github.com/kijai/ComfyUI-segment-anything-2",
+      "folder": "ComfyUI-segment-anything-2",
+      "commit": "0c35fff5f382803e2310103357b5e985f5437f32"
+    },
+    {
       "repo": "https://github.com/Lightricks/ComfyUI-LTXVideo",
       "folder": "ComfyUI-LTXVideo",
       "commit": "220e1d45aa0469f518e982102fca4dca92a61862"
