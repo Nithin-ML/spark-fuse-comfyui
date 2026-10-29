@@ -37,7 +37,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/vfxguru/spark-fuse-comfyui
+          images: ghcr.io/nithin-ml/spark-fuse-comfyui
+          # images: ghcr.io/vfxguru/spark-fuse-comfyui
           # latest is written only by a real push to main. A manual run
           # (workflow_dispatch) never writes it, even with main selected.
           tags: |
