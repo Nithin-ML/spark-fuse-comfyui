@@ -33,6 +33,11 @@
       "commit": "214cfba933291be224156d37bc30c25742076b44"
     },
     {
+      "repo": "https://github.com/theUpsider/ComfyUI-Logic",
+      "folder": "ComfyUI-Logic-legacy",
+      "commit": "f95b332091ec1d6a8b1df4bedf1b054e9807f5e2"
+    },
+    {
       "repo": "https://github.com/MinorBoy/ComfyUI_essentials_mb",
       "folder": "ComfyUI_essentials_mb",
       "commit": "09e7dce4aa3d734151b772da4a4b3abe1c62e7e2"
