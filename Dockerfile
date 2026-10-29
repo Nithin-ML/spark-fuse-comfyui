@@ -62,6 +62,58 @@ subprocess.check_call([sys.executable, "-c",
     "import cv2; cv2.ximgproc.guidedFilter; print('cv2', cv2.__version__, 'with contrib', flush=True)"])
 PY
 
+# OpenCV 5 wheels no longer ship the Haar cascade XML files under cv2/data.
+# EasyColorCorrector (face-aware skin protection) and WAS (face/eye detection)
+# load them from cv2.data.haarcascades and silently detect nothing without
+# them. Restore the stock set from the OpenCV 4.12.0 source tag; the format is
+# unchanged in OpenCV 5. Fails the build if a cascade still cannot load.
+RUN python3.13 - <<'PY'
+import os
+import time
+import urllib.request
+
+import cv2
+
+FILES = (
+    "haarcascade_eye.xml", "haarcascade_eye_tree_eyeglasses.xml",
+    "haarcascade_frontalcatface.xml", "haarcascade_frontalcatface_extended.xml",
+    "haarcascade_frontalface_alt.xml", "haarcascade_frontalface_alt2.xml",
+    "haarcascade_frontalface_alt_tree.xml", "haarcascade_frontalface_default.xml",
+    "haarcascade_fullbody.xml", "haarcascade_lefteye_2splits.xml",
+    "haarcascade_license_plate_rus_16stages.xml", "haarcascade_lowerbody.xml",
+    "haarcascade_profileface.xml", "haarcascade_righteye_2splits.xml",
+    "haarcascade_russian_plate_number.xml", "haarcascade_smile.xml",
+    "haarcascade_upperbody.xml",
+)
+BASE = "https://raw.githubusercontent.com/opencv/opencv/4.12.0/data/haarcascades/"
+
+target = getattr(getattr(cv2, "data", None), "haarcascades", None) \
+    or os.path.join(os.path.dirname(cv2.__file__), "data") + os.sep
+os.makedirs(target, exist_ok=True)
+for name in FILES:
+    dest = os.path.join(target, name)
+    if os.path.isfile(dest):
+        continue
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(BASE + name, timeout=120) as resp:
+                data = resp.read()
+            break
+        except Exception as err:
+            print(f"retry {attempt}/3 for {name}: {err}", flush=True)
+            time.sleep(5 * attempt)
+    else:
+        raise SystemExit(f"could not download {name}")
+    with open(dest, "wb") as fh:
+        fh.write(data)
+print("haar cascades in", target, ":", len(os.listdir(target)), "files", flush=True)
+
+check = cv2.CascadeClassifier(os.path.join(target, "haarcascade_frontalface_default.xml"))
+if check.empty():
+    raise SystemExit("haarcascade_frontalface_default.xml did not load")
+print("face cascade loads OK", flush=True)
+PY
+
 # Benign noise from the base image, cleaned up without moving the ComfyUI pin.
 # - pynvml 13 registers a meta-path finder from a .pth file at interpreter
 #   startup and warns on every import pynvml. Uninstalling that distribution
