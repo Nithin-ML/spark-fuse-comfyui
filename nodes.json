@@ -1,15 +1,45 @@
 {
   "registry": [
-    { "id": "ComfyUI-GGUF", "version": "1.1.10" },
-    { "id": "comfyui-kjnodes", "version": "1.3.7" },
-    { "id": "comfyui_controlnet_aux", "version": "1.1.5" },
-    { "id": "comfyui-easy-use", "version": "1.3.6" },
-    { "id": "comfyui-custom-scripts", "version": "1.2.5" },
-    { "id": "rgthree-comfy", "version": "1.0.2604070017" },
-    { "id": "cg-use-everywhere", "version": "7.8.0" },
-    { "id": "comfyui-image-saver", "version": "1.21.0" },
-    { "id": "comfyui-videohelpersuite", "version": "1.7.9" },
-    { "id": "av-handles", "version": "1.4.0" }
+    {
+      "id": "ComfyUI-GGUF",
+      "version": "1.1.10"
+    },
+    {
+      "id": "comfyui-kjnodes",
+      "version": "1.3.7"
+    },
+    {
+      "id": "comfyui_controlnet_aux",
+      "version": "1.1.5"
+    },
+    {
+      "id": "comfyui-easy-use",
+      "version": "1.3.6"
+    },
+    {
+      "id": "comfyui-custom-scripts",
+      "version": "1.2.5"
+    },
+    {
+      "id": "rgthree-comfy",
+      "version": "1.0.2604070017"
+    },
+    {
+      "id": "cg-use-everywhere",
+      "version": "7.8.0"
+    },
+    {
+      "id": "comfyui-image-saver",
+      "version": "1.21.0"
+    },
+    {
+      "id": "comfyui-videohelpersuite",
+      "version": "1.7.9"
+    },
+    {
+      "id": "av-handles",
+      "version": "1.4.0"
+    }
   ],
   "git": [
     {
@@ -61,6 +91,21 @@
       "repo": "https://github.com/9nate-drake/Comfyui-SecNodes",
       "folder": "Comfyui-SecNodes",
       "commit": "af39e6260bc414873fbb2dc8df355904d1609754"
+    },
+    {
+      "repo": "https://github.com/Nekodificador/ComfyUI-NKD-Basic-Tools",
+      "folder": "ComfyUI-NKD-Basic-Tools",
+      "commit": "726d727217a15a469319731d9a17a66159435557"
+    },
+    {
+      "repo": "https://github.com/yuvraj108c/ComfyUI-Video-Depth-Anything",
+      "folder": "ComfyUI-Video-Depth-Anything",
+      "commit": "a0db08e63d1ea571601c45cde4aaee0acdd0544d"
+    },
+    {
+      "repo": "https://github.com/drozbay/MaskVidExperiments",
+      "folder": "MaskVidExperiments",
+      "commit": "c32ed8c17e6fe892a174ebf25fe98b1317de97fb"
     },
     {
       "repo": "https://github.com/Lightricks/ComfyUI-LTXVideo",
