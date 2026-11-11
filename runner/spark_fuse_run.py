@@ -86,6 +86,16 @@ MODEL_SUBDIRS = [
 ]
 # Generated at runtime from MODEL_BASE_DIR (see write_extra_model_paths()).
 EXTRA_MODEL_PATHS = Path("/tmp/spark_fuse_extra_model_paths.yaml")
+# Model prefetch (Halo Hues). ComfyUI's dynamic-VRAM loader reads weights from
+# /assets in many small random reads while sampling ("Model Initializing"),
+# which is very slow on the Fuse assets mount and its on-node cache. Copying the
+# model files this job references to the node's local NVMe first, in large
+# sequential reads, and pointing ComfyUI there makes every later read local.
+# PREFETCH_MODELS=0 turns it off.
+PREFETCH_MODELS = os.environ.get("PREFETCH_MODELS", "1").lower() not in ("0", "false", "no")
+LOCAL_MODEL_DIR = Path(os.environ.get("LOCAL_MODEL_DIR", "/tmp/spark-models"))
+PREFETCH_THREADS = max(1, int(os.environ.get("PREFETCH_THREADS", "4")))
+MODEL_EXTS = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 # ComfyUI's input directory. /input is read-only for the life of the job, and
 # ComfyUI creates folders there at startup (Load3D's 3d/, uploads, and so on),
 # so the runner copies the job files here and passes this path instead.
@@ -225,7 +235,14 @@ def write_extra_model_paths():
     names = list(MODEL_SUBDIRS)
     extra = _extra_model_dirs()
     names += extra
-    lines = ["spark_fuse:", f"  base_path: {MODEL_BASE_DIR}"]
+    lines = []
+    if PREFETCH_MODELS:
+        # Listed first: ComfyUI returns the first match, so a prefetched local
+        # copy wins over the /assets original. Files never prefetched are still
+        # found under spark_fuse below.
+        lines += ["spark_local:", f"  base_path: {LOCAL_MODEL_DIR}"]
+        lines += [f"  {name}: {name}" for name in MODEL_SUBDIRS]
+    lines += ["spark_fuse:", f"  base_path: {MODEL_BASE_DIR}"]
     lines += [f"  {name}: {name}" for name in names]
     EXTRA_MODEL_PATHS.write_text("\n".join(lines) + "\n")
     log(f"model search base: {MODEL_BASE_DIR}")
@@ -276,6 +293,88 @@ def _link_extra_model_dirs(names):
             log(f"linked models/{name} -> {source}")
         except OSError as err:
             log(f"could not link models/{name}: {err}")
+
+
+def _referenced_model_files(workflows):
+    """Model files under MODEL_BASE_DIR that these API-format workflows name.
+
+    Any string input ending in a model extension is looked up in each standard
+    model folder; every match is returned as a path relative to MODEL_BASE_DIR.
+    Extra custom-node folders are left alone: they are symlinked into ComfyUI's
+    own models/ directory, which ComfyUI searches before any extra path.
+    """
+    base = Path(MODEL_BASE_DIR)
+    names = set()
+    for wf in workflows:
+        for node in wf.values():
+            if not isinstance(node, dict):
+                continue
+            for value in (node.get("inputs") or {}).values():
+                if isinstance(value, str) and value.lower().endswith(MODEL_EXTS):
+                    names.add(value.replace("\\", "/").lstrip("/"))
+    found = {}
+    for name in sorted(names):
+        for folder in MODEL_SUBDIRS:
+            rel = Path(folder) / name
+            try:
+                src = base / rel
+                if ".." not in rel.parts and src.is_file():
+                    found[str(rel)] = src.stat().st_size
+            except OSError:
+                pass
+    return found
+
+
+def _copy_one(rel, size):
+    src = Path(MODEL_BASE_DIR) / rel
+    dest = LOCAL_MODEL_DIR / rel
+    if dest.is_file() and dest.stat().st_size == size:
+        return 0.0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    started = time.time()
+    with open(src, "rb") as fin, open(tmp, "wb") as fout:
+        shutil.copyfileobj(fin, fout, length=64 * 1024 * 1024)
+    tmp.rename(dest)  # atomic: ComfyUI never sees a half-written model
+    return time.time() - started
+
+
+def prefetch_models(workflows):
+    """Copy the job's model files to local NVMe. Runs in a background thread
+    while ComfyUI starts; main() waits for it before submitting a workflow."""
+    try:
+        files = _referenced_model_files(workflows)
+        if not files:
+            log("prefetch: no model files to copy")
+            return
+        total = sum(files.values())
+        free = shutil.disk_usage(LOCAL_MODEL_DIR.parent if LOCAL_MODEL_DIR.parent.exists() else "/tmp").free
+        if total > free * 0.9:
+            log(f"prefetch: skipped, {total / 2**30:.1f} GiB needed but only "
+                f"{free / 2**30:.1f} GiB free on local disk")
+            return
+        log(f"prefetch: copying {len(files)} model file(s), {total / 2**30:.1f} GiB, "
+            f"to local NVMe ({LOCAL_MODEL_DIR})")
+        started = time.time()
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # Largest first so the long copies start early.
+        order = sorted(files.items(), key=lambda kv: kv[1], reverse=True)
+        with ThreadPoolExecutor(max_workers=PREFETCH_THREADS) as pool:
+            futures = {pool.submit(_copy_one, rel, size): (rel, size) for rel, size in order}
+            for fut in as_completed(futures):
+                rel, size = futures[fut]
+                try:
+                    secs = fut.result()
+                    if secs:
+                        log(f"prefetch: {rel} ({size / 2**30:.1f} GiB) in {secs:.0f}s "
+                            f"({size / 2**20 / max(secs, 0.001):.0f} MiB/s)")
+                except Exception as err:  # noqa: BLE001 - fall back to /assets for this file
+                    log(f"prefetch: {rel} failed ({err}); ComfyUI will read it from /assets")
+        elapsed = time.time() - started
+        log(f"prefetch: done in {elapsed:.0f}s "
+            f"({total / 2**20 / max(elapsed, 0.001):.0f} MiB/s overall)")
+    except Exception as err:  # noqa: BLE001 - prefetch is an optimisation only
+        log(f"prefetch: skipped after error ({err})")
 
 
 def stage_input_directory():
@@ -365,8 +464,33 @@ def submit(workflow):
     prompt_id = resp.get("prompt_id")
     if not prompt_id:
         raise WorkflowFailure(3, f"no prompt_id in /prompt response: {resp}")
+    node_errors = resp.get("node_errors") or {}
+    if node_errors:
+        # ComfyUI accepts a prompt when at least one output validates and
+        # silently drops the outputs that failed; the job would then "succeed"
+        # with only part of the graph run (often ending in exit 5, no output).
+        _log_node_errors(node_errors)
+        if os.environ.get("ALLOW_PARTIAL_OUTPUTS", "") not in ("1", "true", "yes"):
+            raise WorkflowFailure(
+                3, f"{len(node_errors)} node(s) failed validation; their outputs "
+                   "would be skipped (set ALLOW_PARTIAL_OUTPUTS=1 to run the rest anyway)")
+        log("ALLOW_PARTIAL_OUTPUTS set: running the outputs that validated")
     log(f"workflow queued, prompt_id={prompt_id}")
     return prompt_id
+
+
+def _log_node_errors(node_errors):
+    log("ComfyUI skipped part of the workflow; these nodes failed validation:")
+    for node_id, info in node_errors.items():
+        info = info if isinstance(info, dict) else {}
+        log(f"  node #{node_id} ({info.get('class_type', '?')}):")
+        for err in info.get("errors") or []:
+            message = err.get("message", "")
+            details = err.get("details", "")
+            log(f"    - {message}" + (f": {details}" if details else ""))
+        outputs = info.get("dependent_outputs") or []
+        if outputs:
+            log(f"    blocks output node(s): {', '.join(map(str, outputs))}")
 
 
 def wait_done(proc, prompt_id):
@@ -558,9 +682,18 @@ def main():
     check_output_writable()
     write_extra_model_paths()
     stage_input_directory()
+    prefetch = None
+    if PREFETCH_MODELS:
+        import threading
+        workflows = [wf for wf, _ in manifest] if manifest is not None else [workflow]
+        prefetch = threading.Thread(target=prefetch_models, args=(workflows,), daemon=True)
+        prefetch.start()
     proc = start_comfyui()
     try:
         wait_ready(proc)
+        if prefetch is not None and prefetch.is_alive():
+            log("waiting for model prefetch to finish before submitting")
+            prefetch.join()
         if manifest is not None:
             exit_code = run_manifest(proc, manifest)
         else:
