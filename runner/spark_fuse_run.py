@@ -107,6 +107,8 @@ PREFETCH_EIO_WAIT = int(os.environ.get("PREFETCH_EIO_WAIT", "1200"))
 # PREFETCH_REQUIRED=0 restores the old fall-back-to-/assets behaviour.
 PREFETCH_REQUIRED = os.environ.get("PREFETCH_REQUIRED", "1").lower() not in ("0", "false", "no")
 PREFETCH_FAILED = []
+import threading as _threading
+PREFETCH_CANCEL = _threading.Event()  # set when the job ends: stops copies at once
 MODEL_EXTS = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 # ComfyUI's input directory. /input is read-only for the life of the job, and
 # ComfyUI creates folders there at startup (Load3D's 3d/, uploads, and so on),
@@ -354,6 +356,8 @@ def _copy_one(rel, size):
     try:
         with open(tmp, "wb") as fout:
             while copied < size:
+                if PREFETCH_CANCEL.is_set():
+                    raise RuntimeError("job ended; copy cancelled")
                 try:
                     buf = os.pread(fd, min(chunk, size - copied), copied)
                 except OSError as err:
@@ -416,10 +420,16 @@ def prefetch_models(workflows):
                         log(f"prefetch: {rel} ({size / 2**30:.1f} GiB) in {secs:.0f}s "
                             f"({size / 2**20 / max(secs, 0.001):.0f} MiB/s)")
                 except Exception as err:  # noqa: BLE001 - fall back to /assets for this file
+                    LOCAL_MODEL_DIR.joinpath(rel + ".part").unlink(missing_ok=True)
+                    if PREFETCH_CANCEL.is_set():
+                        continue  # the job is ending; nothing to report
                     PREFETCH_FAILED.append(rel)
                     LOCAL_MODEL_DIR.joinpath(rel + ".part").unlink(missing_ok=True)
                     log(f"prefetch: {rel} failed ({err}); ComfyUI will read it from /assets")
         elapsed = time.time() - started
+        if PREFETCH_CANCEL.is_set():
+            log(f"prefetch: stopped after {elapsed:.0f}s (job ended)")
+            return
         log(f"prefetch: done in {elapsed:.0f}s "
             f"({total / 2**20 / max(elapsed, 0.001):.0f} MiB/s overall)")
     except Exception as err:  # noqa: BLE001 - prefetch is an optimisation only
@@ -570,8 +580,17 @@ def _adapt_literal_nodes(workflow, info):
     return changed
 
 
+def _has_input(inputs, key):
+    # V3 dynamic inputs (Autogrow, DynamicCombo) appear in /object_info under
+    # one name ("values") but in the workflow as "values.a", "values.b", ...
+    return key in inputs or any(k.startswith(key + ".") for k in inputs)
+
+
 def _workflow_problems(workflow, info):
-    problems = []
+    """(blocking, warnings): node types not installed block the job; a
+    missing input is only a warning, because ComfyUI's own check on submit
+    is the authority there (dynamic inputs vary by node pack)."""
+    problems, warnings = [], []
     for node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
@@ -583,9 +602,10 @@ def _workflow_problems(workflow, info):
         inputs = node.get("inputs") or {}
         required, _ = _node_inputs_schema(info, cls)
         for key in required:
-            if key not in inputs:
-                problems.append(f"node #{node_id} ({cls}): required input {key!r} is missing")
-    return problems
+            if not _has_input(inputs, key):
+                warnings.append(f"node #{node_id} ({cls}): input {key!r} looks missing "
+                                "(ComfyUI checks this for sure when the workflow is submitted)")
+    return problems, warnings
 
 
 def precheck_workflows(workflows):
@@ -601,10 +621,12 @@ def precheck_workflows(workflows):
     bad = set()
     for idx, workflow in enumerate(workflows, start=1):
         _adapt_literal_nodes(workflow, info)
-        problems = _workflow_problems(workflow, info)
+        problems, warnings = _workflow_problems(workflow, info)
+        label = f"workflow {idx}/{len(workflows)}" if len(workflows) > 1 else "workflow"
+        for w in warnings[:20]:
+            log(f"{label}: warning: {w}")
         if problems:
             bad.add(idx)
-            label = f"workflow {idx}/{len(workflows)}" if len(workflows) > 1 else "workflow"
             log(f"{label} will fail — {len(problems)} problem(s):")
             for p in problems[:20]:
                 log(f"  {p}")
@@ -901,6 +923,9 @@ def main():
             files = report_outputs()
             log(f"job complete: {len(files)} file(s) in {OUTPUT_DIR}")
     finally:
+        # The copy threads are pool workers Python waits for at exit; without
+        # this a job that stops early keeps copying (and running) for minutes.
+        PREFETCH_CANCEL.set()
         shutdown(proc)
 
     if manifest is not None:
