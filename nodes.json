@@ -6,7 +6,7 @@
     },
     {
       "id": "comfyui-kjnodes",
-      "version": "1.5.5"
+      "version": "1.3.7"
     },
     {
       "id": "comfyui_controlnet_aux",
@@ -146,6 +146,12 @@
       "repo": "https://github.com/ClownsharkBatwing/RES4LYF",
       "folder": "RES4LYF",
       "commit": "56e44755d866c87ff9cb4b6608c8e42155db6ecc"
+    },
+    {
+      "repo": "https://github.com/1038lab/ComfyUI-RMBG",
+      "folder": "ComfyUI-RMBG",
+      "commit": "f871167b325835b627e233d5792c93f3cfb79b18",
+      "required": false
     }
   ]
 }
