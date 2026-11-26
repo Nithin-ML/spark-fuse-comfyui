@@ -93,11 +93,55 @@ def install_requirements(node_dir: Path):
     )
 
 
+# ---- Optional nodes (Halo Hues addition) -----------------------------------
+# A node with "required": false is installed after every required node, and
+# may only ADD Python packages: every package already installed is pinned at
+# its current version. A requirement that would change one of them is skipped
+# (logged), so a new node can never break the nodes the studio already relies
+# on, and a node that fails to download or install never fails the build. The
+# runner's early workflow check reports any node type that ended up missing.
+FROZEN = Path("/tmp/frozen-constraints.txt")
+OPTIONAL_PROBLEMS = []
+
+
+def freeze_environment():
+    out = subprocess.run([sys.executable, "-m", "pip", "freeze"],
+                         capture_output=True, text=True, check=True).stdout
+    pins = [l for l in out.splitlines() if "==" in l and " @ " not in l
+            and not l.startswith(("-e", "#"))]
+    FROZEN.write_text("\n".join(pins) + "\n")
+    log(f"frozen {len(pins)} installed packages for optional nodes")
+
+
+def _req_lines(req: Path):
+    for line in req.read_text(errors="ignore").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line and not line.startswith(("-", "git+", "http")):
+            yield line
+
+
+def install_optional_requirements(node_dir: Path, label: str):
+    req = node_dir / "requirements.txt"
+    if not req.is_file():
+        return
+    base = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-c", str(FROZEN)]
+    if subprocess.run(base + ["-r", str(req)]).returncode == 0:
+        return
+    # The file as a whole conflicts: install line by line, skip what conflicts.
+    skipped = [line for line in _req_lines(req)
+               if subprocess.run(base + [line]).returncode != 0]
+    if skipped:
+        OPTIONAL_PROBLEMS.append(f"{label}: skipped requirement(s) {', '.join(skipped)}")
+        log(f"WARNING {label}: skipped {', '.join(skipped)}")
+
+
 def main():
     manifest = json.loads(Path(sys.argv[1]).read_text())
     target = Path(sys.argv[2])
     target.mkdir(parents=True, exist_ok=True)
     write_constraints()
+    optional = [n for n in manifest["git"] if n.get("required", True) is False]
+    manifest["git"] = [n for n in manifest["git"] if n.get("required", True) is not False]
 
     for node in manifest["registry"]:
         node_id, version = node["id"], node["version"]
@@ -116,8 +160,26 @@ def main():
         extract_zip(fetch(GITHUB_ZIP.format(**node)), dest)
         install_requirements(dest)
 
+    if optional:
+        freeze_environment()
+    for node in optional:
+        dest = target / node["folder"]
+        label = f"{node['repo']} @ {node['commit'][:12]}"
+        log(f"git (optional): {label}")
+        try:
+            extract_zip(fetch(GITHUB_ZIP.format(**node)), dest)
+        except Exception as exc:  # noqa: BLE001 - optional: never fail the build
+            OPTIONAL_PROBLEMS.append(f"{label}: download failed ({exc})")
+            log(f"WARNING {label}: download failed ({exc})")
+            continue
+        install_optional_requirements(dest, node["folder"])
+
     installed = sorted(p.name for p in target.iterdir() if p.is_dir())
     log(f"installed nodes: {', '.join(installed)}")
+    if OPTIONAL_PROBLEMS:
+        log(f"{len(OPTIONAL_PROBLEMS)} optional node problem(s):")
+        for line in OPTIONAL_PROBLEMS:
+            log(f"  - {line}")
 
 
 if __name__ == "__main__":
