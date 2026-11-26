@@ -63,7 +63,7 @@ WORKFLOW_PATH = Path(os.environ.get("WORKFLOW_PATH", str(INPUT_DIR / "workflow.j
 MANIFEST_PATH = Path(os.environ.get("MANIFEST_PATH", str(INPUT_DIR / "spark_fuse_job.json")))
 PORT = int(os.environ.get("COMFY_PORT", "8188"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
-STARTUP_TIMEOUT = int(os.environ.get("STARTUP_TIMEOUT_SECONDS", "300"))
+STARTUP_TIMEOUT = int(os.environ.get("STARTUP_TIMEOUT_SECONDS", "600"))
 JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT_SECONDS", "0"))  # 0 = no limit
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "2"))
 HEARTBEAT_EVERY = 60
@@ -94,7 +94,19 @@ EXTRA_MODEL_PATHS = Path("/tmp/spark_fuse_extra_model_paths.yaml")
 # PREFETCH_MODELS=0 turns it off.
 PREFETCH_MODELS = os.environ.get("PREFETCH_MODELS", "1").lower() not in ("0", "false", "no")
 LOCAL_MODEL_DIR = Path(os.environ.get("LOCAL_MODEL_DIR", "/tmp/spark-models"))
-PREFETCH_THREADS = max(1, int(os.environ.get("PREFETCH_THREADS", "4")))
+# 2, not more: every byte read from /assets also lands in Spark's on-node asset
+# cache, and several large files copied at once fill a small cache sooner.
+PREFETCH_THREADS = max(1, int(os.environ.get("PREFETCH_THREADS", "2")))
+# When the asset cache disk is full, reads from /assets fail with EIO until the
+# cache frees space. A failed read is retried from the same offset, waiting up
+# to this many seconds in total per file before giving up.
+PREFETCH_EIO_WAIT = int(os.environ.get("PREFETCH_EIO_WAIT", "1200"))
+# If a referenced model still could not be copied, stop with a clear error
+# instead of letting ComfyUI read it from /assets, which on a full cache ends in
+# "Fatal Python error: Bus error" and kills every workflow in the job.
+# PREFETCH_REQUIRED=0 restores the old fall-back-to-/assets behaviour.
+PREFETCH_REQUIRED = os.environ.get("PREFETCH_REQUIRED", "1").lower() not in ("0", "false", "no")
+PREFETCH_FAILED = []
 MODEL_EXTS = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx")
 # ComfyUI's input directory. /input is read-only for the life of the job, and
 # ComfyUI creates folders there at startup (Load3D's 3d/, uploads, and so on),
@@ -333,8 +345,43 @@ def _copy_one(rel, size):
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     started = time.time()
-    with open(src, "rb") as fin, open(tmp, "wb") as fout:
-        shutil.copyfileobj(fin, fout, length=64 * 1024 * 1024)
+    last_note = started
+    copied = 0
+    waited = 0.0
+    chunk = 64 * 1024 * 1024
+    import errno
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        with open(tmp, "wb") as fout:
+            while copied < size:
+                try:
+                    buf = os.pread(fd, min(chunk, size - copied), copied)
+                except OSError as err:
+                    if err.errno != errno.EIO or waited >= PREFETCH_EIO_WAIT:
+                        raise
+                    # Asset cache full: wait for Spark to evict, then resume
+                    # from the same offset.
+                    pause = min(60, 10 + waited / 4)
+                    log(f"prefetch: {rel} read error at {copied / 2**30:.1f} GiB "
+                        f"(asset cache full?); retrying in {pause:.0f}s")
+                    time.sleep(pause)
+                    waited += pause
+                    continue
+                if not buf:
+                    break
+                fout.write(buf)
+                copied += len(buf)
+                now = time.time()
+                # Spark Fuse stops a container that prints nothing for 30
+                # minutes (container_inactive), so report progress each minute.
+                if now - last_note >= 60:
+                    last_note = now
+                    log(f"prefetch: {rel} {copied / 2**30:.1f}/{size / 2**30:.1f} GiB "
+                        f"({copied / 2**20 / (now - started):.0f} MiB/s)")
+    finally:
+        os.close(fd)
+    if copied != size:
+        raise OSError(f"copied {copied} of {size} bytes")
     tmp.rename(dest)  # atomic: ComfyUI never sees a half-written model
     return time.time() - started
 
@@ -369,6 +416,8 @@ def prefetch_models(workflows):
                         log(f"prefetch: {rel} ({size / 2**30:.1f} GiB) in {secs:.0f}s "
                             f"({size / 2**20 / max(secs, 0.001):.0f} MiB/s)")
                 except Exception as err:  # noqa: BLE001 - fall back to /assets for this file
+                    PREFETCH_FAILED.append(rel)
+                    LOCAL_MODEL_DIR.joinpath(rel + ".part").unlink(missing_ok=True)
                     log(f"prefetch: {rel} failed ({err}); ComfyUI will read it from /assets")
         elapsed = time.time() - started
         log(f"prefetch: done in {elapsed:.0f}s "
@@ -437,22 +486,141 @@ def start_comfyui():
     return subprocess.Popen(cmd, cwd=COMFYUI_DIR)
 
 
-def wait_ready(proc):
-    deadline = time.monotonic() + STARTUP_TIMEOUT
-    while time.monotonic() < deadline:
+def wait_ready(proc, busy=None):
+    """Wait for ComfyUI's HTTP server.
+
+    ComfyUI starts while the model prefetch is copying tens of GiB, and on
+    some nodes that slows its start a lot (imports took 5+ minutes on one
+    node). Nothing can be submitted before the prefetch finishes anyway, so
+    the STARTUP_TIMEOUT only counts from the moment busy() turns False.
+    """
+    started = time.monotonic()
+    deadline = started + STARTUP_TIMEOUT
+    last_note = started
+    while True:
+        now = time.monotonic()
+        if busy is not None and busy():
+            deadline = max(deadline, now + STARTUP_TIMEOUT)
+        if now >= deadline:
+            break
         if proc.poll() is not None:
             die(6, f"ComfyUI exited during startup (code {proc.returncode})")
         try:
             stats = http_json("/system_stats", timeout=5)
             names = ", ".join(d.get("name", "?") for d in stats.get("devices", []))
-            log(f"ComfyUI ready (devices: {names or 'unknown'})")
+            log(f"ComfyUI ready after {now - started:.0f}s (devices: {names or 'unknown'})")
             return
         except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            if now - last_note >= 60:
+                last_note = now
+                log(f"ComfyUI still starting ({now - started:.0f}s)")
             time.sleep(1)
-    die(6, f"ComfyUI not ready after {STARTUP_TIMEOUT}s")
+    die(6, f"ComfyUI not ready after {time.monotonic() - started:.0f}s "
+           f"({STARTUP_TIMEOUT}s after the model prefetch finished)")
+
+
+# Save-node inputs that name an output path. A Windows-style prefix such as
+# "SSI\\SHT30\\SHT30" is one file name with backslashes on Linux, not folders,
+# and ShareSync cannot upload such names (the job ends in output_drain_failed).
+_SAVE_PATH_INPUTS = ("filename_prefix", "output_path")
+
+
+def _normalize_save_paths(workflow):
+    """Turn backslashes in save-node path inputs into forward slashes so they
+    become subfolders under /output, as they do on Windows."""
+    for node_id, node in workflow.items():
+        inputs = (node.get("inputs") or {}) if isinstance(node, dict) else {}
+        for key in _SAVE_PATH_INPUTS:
+            value = inputs.get(key)
+            if isinstance(value, str) and "\\" in value:
+                fixed = "/".join(part for part in value.replace("\\", "/").split("/") if part)
+                inputs[key] = fixed
+                log(f"node #{node_id}: {key} {value!r} -> {fixed!r} (Windows path separators)")
+
+
+# ---- Early workflow check (before the model copy finishes) -----------------
+# Node packs disagree on a few common node names. ComfyLiterals and
+# ComfyUI-Logic both register "Int", "Float" and "String"; whichever loads
+# last wins, so a workflow saved on a machine where the other pack won names
+# the input differently ("value" vs "Number"/"String") and ComfyUI rejects it.
+_LITERAL_NODES = ("Int", "Float", "String")
+
+
+def _node_inputs_schema(info, class_type):
+    spec = (info.get(class_type) or {}).get("input") or {}
+    return list((spec.get("required") or {}).keys()), list((spec.get("optional") or {}).keys())
+
+
+def _adapt_literal_nodes(workflow, info):
+    """Rename the single input of Int/Float/String nodes to whatever the
+    installed pack calls it. Returns how many nodes were changed."""
+    changed = 0
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict) or node.get("class_type") not in _LITERAL_NODES:
+            continue
+        inputs = node.get("inputs") or {}
+        required, optional = _node_inputs_schema(info, node["class_type"])
+        missing = [k for k in required if k not in inputs]
+        extra = [k for k in inputs if k not in required and k not in optional]
+        if len(missing) == 1 and len(extra) == 1:
+            inputs[missing[0]] = inputs.pop(extra[0])
+            changed += 1
+            log(f"node #{node_id} ({node['class_type']}): input {extra[0]!r} -> {missing[0]!r} "
+                "(saved with a different node pack's version of this node)")
+    return changed
+
+
+def _workflow_problems(workflow, info):
+    problems = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        cls = node.get("class_type")
+        if cls not in info:
+            title = (node.get("_meta") or {}).get("title") or cls
+            problems.append(f"node #{node_id} ({title}): node type {cls!r} is not installed in this image")
+            continue
+        inputs = node.get("inputs") or {}
+        required, _ = _node_inputs_schema(info, cls)
+        for key in required:
+            if key not in inputs:
+                problems.append(f"node #{node_id} ({cls}): required input {key!r} is missing")
+    return problems
+
+
+def precheck_workflows(workflows):
+    """Check every workflow against the installed nodes as soon as ComfyUI is
+    up, instead of after the model copy (which can take 10+ minutes).
+    Fixes the Int/Float/String clash in place; stops the job if no workflow
+    can run. Returns the set of workflow indexes (1-based) with problems."""
+    try:
+        info = http_json("/object_info", timeout=120)
+    except Exception as exc:  # noqa: BLE001 - the normal submit check still runs
+        log(f"early workflow check skipped ({exc})")
+        return set()
+    bad = set()
+    for idx, workflow in enumerate(workflows, start=1):
+        _adapt_literal_nodes(workflow, info)
+        problems = _workflow_problems(workflow, info)
+        if problems:
+            bad.add(idx)
+            label = f"workflow {idx}/{len(workflows)}" if len(workflows) > 1 else "workflow"
+            log(f"{label} will fail — {len(problems)} problem(s):")
+            for p in problems[:20]:
+                log(f"  {p}")
+            if len(problems) > 20:
+                log(f"  ... and {len(problems) - 20} more")
+    if bad and len(bad) == len(workflows) and os.environ.get(
+            "ALLOW_PARTIAL_OUTPUTS", "") not in ("1", "true", "yes"):
+        die(3, "no workflow can run with the nodes in this image (see the problems above); "
+               "stopping before the model copy finishes")
+    if not bad:
+        log(f"early workflow check: {len(workflows)} workflow(s) OK")
+    return bad
 
 
 def submit(workflow):
+    _normalize_save_paths(workflow)
     payload = {"prompt": workflow, "client_id": "spark-fuse-runner"}
     try:
         resp = http_json("/prompt", payload=payload, timeout=60)
@@ -573,10 +741,24 @@ def _collect_new_outputs(before, subdir_name):
     subdir.mkdir(parents=True, exist_ok=True)
     moved = []
     for f in new_files:
-        dest = subdir / f.name
+        # Keep the save node's subfolders (FJ/sc_67/...) inside wf_NN, and turn
+        # any backslash left in a file name into a folder: ShareSync cannot
+        # upload names containing "\\".
+        rel = f.relative_to(OUTPUT_DIR).as_posix().replace("\\", "/")
+        parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+        dest = subdir.joinpath(*parts)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         f.rename(dest)
         moved.append(dest)
         log(f"output: {dest.relative_to(OUTPUT_DIR)} ({dest.stat().st_size:,} bytes)")
+    # Remove the save node's now-empty folders left at the top of /output.
+    for d in sorted({p.parent for p in new_files}, key=lambda p: len(p.parts), reverse=True):
+        while d != OUTPUT_DIR and OUTPUT_DIR in d.parents:
+            try:
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
     return moved
 
 
@@ -690,10 +872,16 @@ def main():
         prefetch.start()
     proc = start_comfyui()
     try:
-        wait_ready(proc)
+        wait_ready(proc, busy=(prefetch.is_alive if prefetch is not None else None))
+        precheck_workflows([wf for wf, _ in manifest] if manifest is not None else [workflow])
         if prefetch is not None and prefetch.is_alive():
             log("waiting for model prefetch to finish before submitting")
             prefetch.join()
+        if PREFETCH_FAILED and PREFETCH_REQUIRED:
+            die(6, f"{len(PREFETCH_FAILED)} model file(s) could not be read from /assets "
+                   "(Spark's on-node asset cache is probably full; see the [assets] lines). "
+                   "Stopping now: reading them from /assets would crash ComfyUI with a bus "
+                   "error. Retry the job, or set PREFETCH_REQUIRED=0 to try anyway.")
         if manifest is not None:
             exit_code = run_manifest(proc, manifest)
         else:
