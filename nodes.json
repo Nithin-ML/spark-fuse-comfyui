@@ -152,6 +152,12 @@
       "folder": "ComfyUI-RMBG",
       "commit": "f871167b325835b627e233d5792c93f3cfb79b18",
       "required": false
+    },
+    {
+      "repo": "https://github.com/mo-akkakk/ComfyUI-MiniMaxH3-TemporalWindow-SpatialTiles",
+      "folder": "ComfyUI-MiniMaxH3-TemporalWindow-SpatialTiles",
+      "commit": "2dae4c43572d74495c6f660607f4db7578b699df",
+      "required": false
     }
   ]
 }
